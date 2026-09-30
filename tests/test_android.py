@@ -207,7 +207,7 @@ def test_cli_network_route_sends_endpoint():
         device.shell = AsyncMock(return_value='')
         points = [Point(31, 121), Point(31.000001, 121), Point(31.000002, 121)]
         callback = AsyncMock()
-        await device.play(points, .001, speed_kmh=300, on_point=callback)
+        await device.play(points, .1, speed_kmh=300, on_point=callback)
         assert device.injections['network']['lat'] == points[-1].latitude
         assert callback.await_count == 2
     asyncio.run(scenario())

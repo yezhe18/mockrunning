@@ -82,7 +82,7 @@ function fit() {
   if (points.length && map) { map.stop(); map.fitBounds(points.map(coord), {padding:[60,60],maxZoom:17,animate:false}); }
 }
 function locatePhone() {
-  const point = status?.real_current || status?.current;
+  const point = displayedPosition(status);
   if (!map || !status?.connected || !point) {
     message('暂无手机坐标：USB 定位接口不能读取真实 GPS；载入路线后可显示已发送的模拟位置。', 'error');
     return;
@@ -119,7 +119,7 @@ function renderPlaceResults(results) {
 }
 function settings() {
   const data = {};
-  for (const input of $('settings').querySelectorAll('[name]')) data[input.name] = input.type === 'checkbox' ? input.checked : Number(input.value);
+  for (const input of $('settings').querySelectorAll('[name]')) data[input.name] = input.type === 'checkbox' ? input.checked : input.tagName === 'SELECT' ? input.value : Number(input.value);
   return data;
 }
 function fillSettings(data) {
@@ -128,9 +128,12 @@ function fillSettings(data) {
   }
   $('pace').value = +(60/data.speed_kmh).toFixed(4);
 }
+function displayedPosition(data) {
+  return data?.current || (data?.readback_age_s != null && data.readback_age_s <= 10 ? data.real_current : null);
+}
 function renderStatus(data) {
-  const firstPosition = data.connected && data.current &&
-    (!status?.connected || !status.current || status.udid !== data.udid);
+  const firstPosition = data.connected && displayedPosition(data) &&
+    (!status?.connected || !displayedPosition(status) || status.udid !== data.udid);
   status = data;
   $('service').textContent = '本地服务已连接';
   const devices = data.devices.filter(d => (d.platform || 'ios') === $('platform').value);
@@ -160,16 +163,14 @@ function renderStatus(data) {
   loaded = data.route.points;
   if (changed && mode === 'player') renderRoute();
   if (!initialized) { fillSettings(data.settings); initialized = true; }
-  const displayedPosition = data.real_current || data.current;
-  if (displayedPosition) {
-    $('position').textContent = data.real_current
-      ? `手机实测：${data.real_current.lat.toFixed(6)}, ${data.real_current.lng.toFixed(6)}`
-      : `已发送：${data.current.lat.toFixed(6)}, ${data.current.lng.toFixed(6)}`;
+  const point = displayedPosition(data);
+  if (point) {
+    $('position').textContent = `${data.current ? '已发送' : 'WDA 读回'}：${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
     if (map) {
-      liveMarker.setLatLng(coord(displayedPosition));
+      liveMarker.setLatLng(coord(point));
       if (!map.hasLayer(liveMarker)) liveMarker.addTo(map);
-      if (firstPosition || (data.real_current && !status?.real_current)) locatePhone();
-      else if ($('follow').checked && mode === 'player') map.panTo(coord(displayedPosition));
+      if (firstPosition) locatePhone();
+      else if ($('follow').checked && mode === 'player') map.panTo(coord(point));
     }
   } else { $('position').textContent = '尚未发送模拟坐标'; if (liveMarker) liveMarker.remove(); }
   controls();
@@ -194,7 +195,7 @@ async function importFile(file, target) {
 function exportRoute() {
   const escape = str => str.replace(/[<>&"']/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
   const name = $('route-name').value || 'route';
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Route Studio" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>${escape(name)}</name><trkseg>\n${draft.map(p=>`<trkpt lat="${p.lat.toFixed(8)}" lon="${p.lng.toFixed(8)}"/>`).join('\n')}\n</trkseg></trk></gpx>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Route Studio" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>${escape(name)}</name><trkseg>\n${draft.map(p=>`<trkpt lat="${p.lat.toFixed(8)}" lon="${p.lng.toFixed(8)}">${p.time ? `<time>${escape(p.time)}</time>` : ''}</trkpt>`).join('\n')}\n</trkseg></trk></gpx>`;
   const url=URL.createObjectURL(new Blob([xml],{type:'application/gpx+xml'})), a=document.createElement('a');
   a.href=url; a.download=name.replace(/[\\/:*?"<>|]/g,'_')+'.gpx'; document.body.append(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),10000); message(`已导出 ${draft.length} 个节点。运动参数在回放页单独设置。`,'success');

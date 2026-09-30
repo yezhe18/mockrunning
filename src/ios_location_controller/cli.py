@@ -18,8 +18,8 @@ def positive_float(value: str) -> float:
 
 def percentage(value: str) -> float:
     number = float(value)
-    if not 0 <= number <= 100:
-        raise argparse.ArgumentTypeError("must be between 0 and 100")
+    if not math.isfinite(number) or not 0 <= number <= 80:
+        raise argparse.ArgumentTypeError("must be between 0 and 80")
     return number
 
 
@@ -57,10 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("route", type=Path)
     play.add_argument("--udid")
     play.add_argument("--interval", type=positive_float, default=1.0, help="GPS update interval in seconds")
-    play.add_argument("--speed-kmh", type=positive_float, help="Travel speed along the route in km/h")
-    play.add_argument("--speed-variation-pct", type=percentage, default=0.0, help="Random speed variation per segment")
+    play.add_argument("--speed-kmh", type=positive_float, default=5.0, help="Cruise speed along the route in km/h (default 5)")
+    play.add_argument("--speed-variation-pct", type=percentage, default=0.0, help="Bounded smooth speed variation")
     play.add_argument("--lateral-variation-m", type=nonnegative_float, default=0.0, help="Left/right sway amplitude in meters")
     play.add_argument("--random-seed", type=int, help="Optional seed for repeatable movement variation")
+    play.add_argument("--timing-mode", choices=["speed", "timestamps"], default="speed")
+    play.add_argument("--variation-period", type=positive_float, default=12.0, help="Random-signal correlation time in seconds")
+    play.add_argument("--max-acceleration-mps2", type=positive_float, default=.8)
+    play.add_argument("--corner-radius-m", type=nonnegative_float, default=3.0, help="Corner inset distance (0 preserves the polyline)")
+    play.add_argument("--max-lateral-acceleration-mps2", type=positive_float, default=1.5)
     play.add_argument("--loop", action="store_true")
     play.add_argument("--android-provider", choices=["gps", "network", "both"], default="gps")
     play.add_argument("--gps-accuracy", type=positive_float, default=5.0, help="Android test hAcc in meters")
@@ -138,6 +143,11 @@ async def run(args: argparse.Namespace) -> None:
                 args.speed_variation_pct,
                 args.lateral_variation_m,
                 args.random_seed,
+                timing_mode=args.timing_mode,
+                variation_period=args.variation_period,
+                max_acceleration_mps2=args.max_acceleration_mps2,
+                corner_radius_m=args.corner_radius_m,
+                max_lateral_acceleration_mps2=args.max_lateral_acceleration_mps2,
             )
     finally:
         await device.close()

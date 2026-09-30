@@ -45,14 +45,17 @@
         <div class="row"><button id="player-import">导入 GPX 数据</button><span id="loaded-route">未载入路线</span></div><button id="clear-loaded-route" class="danger wide" type="button">清空已载入路线</button><input type="file" id="player-file" accept=".gpx" hidden>
         <section class="place-card"><b>输入地点并切换定位</b><div class="row"><input id="place-query" placeholder="例如：上海人民广场" maxlength="200"><button id="place-search">搜索</button></div><select id="place-results" aria-label="地点搜索结果"><option value="">搜索结果会显示在这里</option></select><button id="place-switch" class="primary wide" disabled>切换到选中地点</button><small>搜索结果来自 OpenStreetMap。切换不会修改路线；运行路线时请先暂停或停止。</small></section>
         <form id="settings"><fieldset id="parameters"><legend>运动参数</legend>
+          <label>回放方式<select name="timing_mode"><option value="speed">运动模型（速度与加减速）</option><option value="timestamps">GPX 原始时间戳（不叠加波动）</option></select></label>
           <div class="row"><label>速度 km/h<input name="speed_kmh" id="speed" type="number" min="0.1" max="300" step="any" value="5" required></label><label>配速 min/km<input id="pace" type="number" min="0.2" max="600" step="any" value="12" required></label></div>
           <div class="row"><label>速度波动 ±%<input name="speed_variation_pct" type="number" min="0" max="80" step="any" value="10" required></label><label>左右波动 m<input name="lateral_variation_m" type="number" min="0" max="20" step="any" value="1" required></label></div>
-          <div class="row"><label>波动周期 s<input name="variation_period" type="number" min="2" max="120" step="any" value="12" required></label><label>定位更新间隔 s<input name="interval" type="number" min="0.1" max="10" step="any" value="1" required></label></div>
+          <div class="row"><label>波动相关时间 s<input name="variation_period" type="number" min="2" max="120" step="any" value="12" required></label><label>定位更新间隔 s<input name="interval" type="number" min="0.1" max="10" step="any" value="1" required></label></div>
+          <div class="row"><label>加减速上限 m/s²<input name="max_acceleration_mps2" type="number" min="0.05" max="10" step="any" value="0.8" required></label><label>转弯限速参数 m/s²<input name="max_lateral_acceleration_mps2" type="number" min="0.05" max="10" step="any" value="1.5" required></label></div>
+          <label>拐角过渡距离 m<input name="corner_radius_m" type="number" min="0" max="50" step="any" value="3" required></label>
           <label>随机种子（相同参数可复现）<input name="random_seed" type="number" min="0" max="2147483647" step="1" value="42" required></label>
-          <label class="check"><input name="loop" type="checkbox">循环路线（终点返回起点，非闭合路线会跳转）</label>
+          <label class="check"><input name="loop" type="checkbox">循环闭合路线（须先布设返回起点的路径）</label>
           <button type="submit" id="apply">保存参数</button>
         </fieldset></form>
-        <p class="hint">运动中参数锁定；暂停后可调整并继续。随机种子在重新开始时生效。波动仅用于定位测试，不代表真实人体运动。</p>
+        <p class="hint">暂停后可调速度与波动；更改回放方式、拐角、加速度上限、循环或种子须先停止。时间戳模式要求每个节点都有递增且含时区的时间。拐角过渡会局部偏离原始折线；设为 0 可保留折线。显示速度为路线中心线的模型速度，波动不代表真实人体运动。</p>
         <div class="transport"><button id="start" class="primary">开始移动</button><button id="pause">暂停</button><button id="stop" class="danger">停止并清除模拟</button></div>
         <div class="telemetry"><div class="row"><b id="play-state">未开始</b><span id="live-speed">0 km/h</span></div><progress id="progress" max="100" value="0"></progress><span id="position">尚未发送模拟坐标</span><small id="progress-text">0 m · 0 s</small></div>
         <p class="hint">橙色圆点显示最近成功发送的模拟坐标，不是从手机读回的 GPS。完成后停留终点，停止或断开会请求恢复真实定位。</p>

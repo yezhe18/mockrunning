@@ -30,6 +30,7 @@ else
     echo "正在启动 Route Studio 服务..."
     nohup "$PYTHON" -m ios_location_controller.web > "$SCRIPT_DIR/server.stdout.log" 2> "$SCRIPT_DIR/server.stderr.log" &
     SERVER_PID=$!
+    echo "$SERVER_PID" > "$SCRIPT_DIR/server.pid"
 
     READY=0
     for _ in {1..30}; do
@@ -38,9 +39,15 @@ else
             READY=1
             break
         fi
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            break
+        fi
     done
 
     if [[ $READY -ne 1 ]]; then
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            rm -f "$SCRIPT_DIR/server.pid"
+        fi
         echo "错误: 服务启动超时，请检查日志: $SCRIPT_DIR/server.stderr.log" >&2
         exit 1
     fi
@@ -52,5 +59,5 @@ echo "=========================================="
 
 # 尝试用系统默认浏览器打开
 if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$URL/?v=2" >/dev/null 2>&1 &
+    xdg-open "$URL/" >/dev/null 2>&1 &
 fi

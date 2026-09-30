@@ -2,31 +2,23 @@
 import json
 import mimetypes
 import os
+import signal
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
-import xml.etree.ElementTree as ET
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .motion import route_points
+from . import __version__
+from .gpx import parse_points, point_data
 from .playback import PlaybackController
 
 STATIC = Path(__file__).parent / "static"
 
 
 def parse_gpx(text):
-    if not isinstance(text, str) or len(text) > 2_000_000:
-        raise ValueError("GPX exceeds 2 MB")
-    if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
-        raise ValueError("XML entities are not supported")
-    root = ET.fromstring(text)
-    nodes = [n for n in root.iter() if n.tag.split("}")[-1] == "trkpt"]
-    if not nodes:
-        nodes = [n for n in root.iter() if n.tag.split("}")[-1] == "rtept"]
-    points = [{"lat": float(n.attrib["lat"]), "lng": float(n.attrib["lon"])} for n in nodes]
-    route_points(points)
-    return points
+    return [point_data(p) for p in parse_points(text)]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -56,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(self.server.controller.status())
                 return
             if path == "/api/health":
-                self.json({"app": "ios-location-controller", "version": "2.0"})
+                self.json({"app": "ios-location-controller", "version": __version__})
                 return
             name = "index.html" if path == "/" else path.removeprefix("/static/")
             target = (STATIC / name).resolve()
@@ -121,14 +113,27 @@ def serve(host="127.0.0.1", port=8765):
     server = ThreadingHTTPServer((host, port), Handler)
     path = Path(os.environ.get("IOS_LOCATION_STATE", Path.home() / ".ios-location-controller" / "session.json"))
     server.controller = PlaybackController(path)
-    print(f"iOS Location Controller 2.0: http://{host}:{port}", flush=True)
+    print(f"iOS Location Controller {__version__}: http://{host}:{port}", flush=True)
+    handlers = {}
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            handlers[signum] = signal.signal(signum, stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.controller.close()
-        server.server_close()
+        # Further signals must not interrupt device cleanup midway.
+        for signum in handlers:
+            signal.signal(signum, signal.SIG_IGN)
+        try:
+            server.controller.close()
+        finally:
+            server.server_close()
+            for signum, previous in handlers.items():
+                signal.signal(signum, previous)
 
 
 def main():

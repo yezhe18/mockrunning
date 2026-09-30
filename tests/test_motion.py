@@ -18,10 +18,13 @@ def test_motion_repeatability_and_bounds():
     settings=Settings()
     points=route_points(ROUTE)
     a,b=Motion(points,settings),Motion(points,settings)
+    previous = 0.0
     for _ in range(10):
         result=a.advance(.5,settings)
         assert result==b.advance(.5,settings)
-        assert 4.5 <= result[1] <= 5.5
+        assert 0 <= result[1] <= 5.5
+        assert abs(result[1] - previous) / 3.6 <= settings.max_acceleration_mps2 * .5 + 1e-8
+        previous = result[1]
     assert a.elapsed==5
 
 def test_end_and_loop():
@@ -30,8 +33,11 @@ def test_end_and_loop():
     m=Motion(points,settings)
     p,_,done=m.advance(1000,settings)
     assert done and distance_meters(p,points[-1])<.001
-    m=Motion(points,settings)
-    assert not m.advance(1000,Settings(loop=True))[2]
+    with pytest.raises(ValueError, match='closed'):
+        Motion(points, Settings(loop=True))
+    settings = Settings(loop=True)
+    m=Motion(points + [points[0]],settings)
+    assert not m.advance(1000,settings)[2]
     assert m.laps>0
 
 def test_gpx_validation():

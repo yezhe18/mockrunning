@@ -13,6 +13,7 @@ dist/
 
 # Runtime output and local diagnostics
 *.log
+server.pid
 artifacts/
 backups/
 

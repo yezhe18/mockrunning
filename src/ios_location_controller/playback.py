@@ -7,12 +7,13 @@ import threading
 from pathlib import Path
 from .connections import create_device
 from .android import discover as discover_android, pair
-from .gpx import Point
-from .motion import Motion, Settings, route_points
+from .gpx import Point, point_data
+from .motion import Motion, Route, Settings, route_points
 
 
 class PlaybackController:
     """Serialize all device I/O and state transitions on one owned event loop."""
+    READBACK_INTERVAL = 3.0
 
     def __init__(self, state_path: Path, device_factory=create_device):
         self.path = state_path
@@ -34,10 +35,17 @@ class PlaybackController:
         self.external_rsd = False
         self.real_current = None
         self.wda_error = None
+        self.readback_time = None
+        self.readback_generation = 0
+        self._route_total = None
+        self._closed = False
+        self._ready = threading.Event()
         self._load()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+        if not self._ready.wait(5):
+            raise RuntimeError("Playback worker could not start")
 
     def _load(self):
         if not self.path.exists():
@@ -59,7 +67,20 @@ class PlaybackController:
         temp.replace(self.path)
 
     def _coordinates(self):
-        return [{"lat": p.latitude, "lng": p.longitude} for p in self.points]
+        return [point_data(p) for p in self.points]
+
+    def _invalidate_readback(self):
+        self.readback_generation += 1
+        self.real_current = None
+        self.readback_time = None
+
+    def _total_m(self):
+        if self.motion:
+            return self.motion.total
+        if self._route_total is None:
+            radius = self.settings.corner_radius_m if self.settings.timing_mode == "speed" else 0
+            self._route_total = Route(self.points, radius).total if self.points else 0
+        return self._route_total
 
     def _run(self):
         asyncio.set_event_loop(self.loop)
@@ -67,9 +88,22 @@ class PlaybackController:
         self.last_tick = self.loop.time()
         self.runner = self.loop.create_task(self._tick())
         self.discovery = self.loop.create_task(self._discover())
-        self.loop.run_forever()
+        self.readback = self.loop.create_task(self._readback())
+        self._ready.set()
+        try:
+            self.loop.run_forever()
+        finally:
+            tasks = asyncio.all_tasks(self.loop)
+            for task in tasks:
+                task.cancel()
+            self.loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.run_until_complete(self.loop.shutdown_default_executor())
+            self.loop.close()
 
     def call(self, action, data=None):
+        if self._closed:
+            raise RuntimeError("Playback controller is closed")
         future = asyncio.run_coroutine_threadsafe(self._action(action, data or {}), self.loop)
         try:
             return future.result(timeout=40)
@@ -87,10 +121,11 @@ class PlaybackController:
                 "devices": self.devices, "discovery_error": self.discovery_error, "error": self.error,
                 "route": {"name": self.name, "points": self._coordinates()},
                 "real_current": self.real_current, "wda_error": self.wda_error,
+                "readback_age_s": self.loop.time() - self.readback_time if self.readback_time is not None else None,
                 "settings": asdict(self.settings), "current": self.current, "speed_kmh": self.speed,
                 "distance_m": self.motion.distance if self.motion else 0,
                 "elapsed_s": self.motion.elapsed if self.motion else 0,
-                "total_m": self.motion.total if self.motion else (Motion(self.points, self.settings).total if self.points else 0),
+                "total_m": self._total_m(),
                 "laps": self.motion.laps if self.motion else 0}
 
     async def _send(self, point, route=False):
@@ -99,8 +134,10 @@ class PlaybackController:
             return
         # Last successfully sent simulated coordinate, not a GPS readback.
         self.current = {"lat": point.latitude, "lng": point.longitude}
+        self._invalidate_readback()
 
     async def _close_device(self):
+        self._invalidate_readback()
         device = self.device
         if device:
             await asyncio.wait_for(device.close(), 10)
@@ -120,6 +157,7 @@ class PlaybackController:
                     points = route_points(data.get("points"))
                     self.points, self.name = points, str(data.get("name", "Route"))[:120]
                     self.motion = None
+                    self._route_total = None
                     self._save()
                     if self.device:
                         await self._send(points[0])
@@ -132,6 +170,8 @@ class PlaybackController:
                     self.name = ""
                     self.motion = None
                     self.current = None
+                    self._invalidate_readback()
+                    self._route_total = None
                     self.speed = 0
                     self.pending_time = 0.0
                     self.state = "ready" if self.device else "idle"
@@ -139,7 +179,11 @@ class PlaybackController:
                 elif action == "settings":
                     if self.state == "playing":
                         raise ValueError("Pause before changing parameters")
-                    self.settings = Settings.parse(data)
+                    settings = Settings.parse(data)
+                    if self.state == "paused" and any(getattr(settings, key) != getattr(self.settings, key) for key in Motion.STRUCTURAL_SETTINGS):
+                        raise ValueError("Stop before changing replay mode, corners, acceleration limits, loop or seed")
+                    self.settings = settings
+                    self._route_total = None
                     self.pending_time = 0.0
                     self.last_tick = self.loop.time()
                     self._save()
@@ -171,7 +215,8 @@ class PlaybackController:
                         self.external_rsd = bool(data.get("rsd_host"))
                         self.udid = getattr(device, "udid", None) or data.get("udid")
                         try:
-                            self.real_current = await device.read_location()
+                            self.real_current = await asyncio.wait_for(device.read_location(), 4)
+                            self.readback_time = self.loop.time()
                             self.wda_error = None
                         except Exception as exc:
                             self.real_current = None
@@ -198,18 +243,23 @@ class PlaybackController:
                     if not -85 <= lat <= 85 or not -180 <= lng <= 180:
                         raise ValueError("Invalid coordinates")
                     await self._send(Point(lat, lng))
+                    self.motion = None
+                    self.speed = 0
+                    self.pending_time = 0.0
                     self.state = "ready"
                 elif action == "pause":
                     if self.state == "playing":
                         self.state = "paused"
                         self.speed = 0
                 elif action == "stop":
+                    if self.device:
+                        await asyncio.wait_for(self.device.clear(), 8)
                     self.state = "ready" if self.device else "idle"
                     self.motion = None
                     self.speed = 0
-                    if self.device:
-                        await asyncio.wait_for(self.device.clear(), 8)
                     self.current = None
+                    self.pending_time = 0.0
+                    self._invalidate_readback()
                 elif action == "disconnect":
                     self.state = "idle"
                     await self._close_device()
@@ -274,15 +324,41 @@ class PlaybackController:
             # Actual device writes detect transport failure without false disconnects.
             await asyncio.sleep(3)
 
+    async def _readback(self):
+        while True:
+            await asyncio.sleep(self.READBACK_INTERVAL)
+            device, generation = self.device, self.readback_generation
+            reader = getattr(device, "read_location", None)
+            if device is None or self.state == "connecting" or not callable(reader):
+                continue
+            try:
+                point = await asyncio.wait_for(reader(), 4)
+            except Exception as exc:
+                if device is self.device and generation == self.readback_generation:
+                    self.real_current = None
+                    self.readback_time = None
+                    self.wda_error = str(exc) or type(exc).__name__
+            else:
+                if device is self.device and generation == self.readback_generation:
+                    self.real_current = point
+                    self.readback_time = self.loop.time()
+                    self.wda_error = None
+
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
         async def shutdown():
             self.runner.cancel()
             self.discovery.cancel()
-            await asyncio.gather(self.runner, self.discovery, return_exceptions=True)
+            self.readback.cancel()
+            await asyncio.gather(self.runner, self.discovery, self.readback, return_exceptions=True)
             await self._close_device()
         future = asyncio.run_coroutine_threadsafe(shutdown(), self.loop)
         try:
             future.result(timeout=15)
         finally:
             self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(timeout=2)
+            self.thread.join(timeout=6)
+            if self.thread.is_alive():
+                raise RuntimeError("Playback worker did not finish cleanup")

@@ -5,6 +5,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 import pytest
 from ios_location_controller.web import Handler
+from ios_location_controller import __version__
 
 @pytest.fixture
 def server():
@@ -17,7 +18,7 @@ def test_static_and_health(server):
     for path in ['/','/static/app.js','/static/app.css','/static/leaflet.js']:
         with urlopen(server+path) as r:
             assert r.status==200 and r.headers['Cache-Control']=='no-store'
-    assert json.load(urlopen(server+'/api/health'))['version']=='2.0'
+    assert json.load(urlopen(server+'/api/health'))['version']==__version__
     with pytest.raises(HTTPError) as exc: urlopen(server+'/static/../../README.md')
     assert exc.value.code==404
 

@@ -4,8 +4,6 @@ import logging
 from collections.abc import Sequence
 import asyncio
 import math
-import random
-import time
 import json
 import subprocess
 import urllib.request
@@ -13,7 +11,8 @@ import sys
 from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable
 
-from .gpx import Point, bearing_radians, distance_meters, interpolate, offset_point
+from .gpx import Point
+from .motion import Motion, Settings
 
 log = logging.getLogger(__name__)
 
@@ -83,9 +82,11 @@ class LocationDevice:
 
         # WDA is optional: the DVT simulation path must remain usable when it is absent.
         try:
+            command = [sys.executable, "-m", "pymobiledevice3", "usbmux", "forward", "8100", "8100"]
+            if self.udid:
+                command.extend(["--serial", self.udid])
             self._wda_process = subprocess.Popen(
-                [sys.executable, "-m", "pymobiledevice3", "usbmux", "forward", "8100", "8100",
-                 "--serial", self.udid or ""],
+                command,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -104,14 +105,24 @@ class LocationDevice:
             value = data.get("value", data)
             if "latitude" not in value or "longitude" not in value:
                 raise RuntimeError(value.get("message", "WDA returned no location"))
-            return {"lat": float(value["latitude"]), "lng": float(value["longitude"]),
-                    "altitude": float(value.get("altitude", 0))}
+            point = {"lat": float(value["latitude"]), "lng": float(value["longitude"]),
+                     "altitude": float(value.get("altitude", 0))}
+            if not all(math.isfinite(v) for v in point.values()) or not -90 <= point["lat"] <= 90 or not -180 <= point["lng"] <= 180:
+                raise RuntimeError("WDA returned invalid coordinates")
+            return point
         return await asyncio.to_thread(request)
 
     def _stop_wda(self):
-        if self._wda_process and self._wda_process.poll() is None:
-            self._wda_process.terminate()
-        self._wda_process = None
+        process, self._wda_process = self._wda_process, None
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
 
     async def set_point(self, point: Point) -> None:
         if self._simulation is None:
@@ -129,55 +140,48 @@ class LocationDevice:
         random_seed: int | None = None,
         on_point: Callable[[Point], Awaitable[None]] | None = None,
         pause_event: asyncio.Event | None = None,
+        *,
+        timing_mode: str = "speed",
+        variation_period: float = 12.0,
+        max_acceleration_mps2: float = 0.8,
+        corner_radius_m: float = 3.0,
+        max_lateral_acceleration_mps2: float = 1.5,
     ) -> None:
-        if not points or interval <= 0:
-            raise ValueError("Route must contain points and interval must be positive")
-        if speed_kmh is not None and speed_kmh <= 0:
-            raise ValueError("Speed must be positive")
-        if not 0 <= speed_variation_pct <= 100:
-            raise ValueError("Speed variation must be between 0 and 100 percent")
-        if lateral_variation_m < 0:
-            raise ValueError("Lateral variation must not be negative")
-        rng = random.Random(random_seed)
+        settings = Settings.parse({
+            "speed_kmh": 5.0 if speed_kmh is None else speed_kmh,
+            "interval": interval, "loop": loop, "speed_variation_pct": speed_variation_pct,
+            "lateral_variation_m": lateral_variation_m,
+            "random_seed": 42 if random_seed is None else random_seed,
+            "timing_mode": timing_mode, "variation_period": variation_period,
+            "max_acceleration_mps2": max_acceleration_mps2, "corner_radius_m": corner_radius_m,
+            "max_lateral_acceleration_mps2": max_lateral_acceleration_mps2,
+        })
+        motion = Motion(points, settings)
+        if pause_event is not None:
+            await pause_event.wait()
+        await self.set_point(points[0])
+        if on_point is not None:
+            await on_point(points[0])
+        clock = asyncio.get_running_loop().time
+        last = clock()
         while True:
-            if pause_event is not None:
+            if pause_event is not None and not pause_event.is_set():
                 await pause_event.wait()
-            await self.set_point(points[0])
-            if on_point is not None:
-                await on_point(points[0])
-            for segment, (start, end) in enumerate(zip(points, points[1:]), 1):
-                if speed_kmh is None:
-                    if pause_event is not None:
-                        await pause_event.wait()
-                    sender = self.set_point if segment == len(points) - 1 else self.set_route_point
-                    sent = await sender(end)
-                    if on_point is not None and sent is not False:
-                        await on_point(end)
-                    await asyncio.sleep(interval)
-                    continue
-                segment_distance = distance_meters(start, end)
-                variation = speed_variation_pct / 100
-                segment_speed = speed_kmh * rng.uniform(max(0.01, 1 - variation), 1 + variation)
-                duration = segment_distance / (segment_speed / 3.6)
-                steps = max(1, math.ceil(duration / interval))
-                started = time.monotonic()
-                bearing = bearing_radians(start, end)
-                lateral = rng.uniform(-lateral_variation_m, lateral_variation_m)
-                for step in range(1, steps + 1):
-                    if pause_event is not None:
-                        await pause_event.wait()
-                    fraction = step / steps
-                    point = interpolate(start, end, fraction)
-                    sway = lateral * math.sin(math.pi * fraction)
-                    point = offset_point(point, -math.sin(bearing) * sway, math.cos(bearing) * sway)
-                    sender = self.set_point if segment == len(points) - 1 and step == steps else self.set_route_point
-                    sent = await sender(point)
-                    if on_point is not None and sent is not False:
-                        await on_point(point)
-                    target = started + duration * step / steps
-                    await asyncio.sleep(max(0.0, target - time.monotonic()))
-                log.debug("Segment %.1f m at %.2f km/h completed in %.2f s", segment_distance, segment_speed, duration)
-            if not loop:
+                last = clock()
+            # Wait before moving: short segments must not reach their endpoint early.
+            await asyncio.sleep(settings.interval)
+            if pause_event is not None and not pause_event.is_set():
+                await pause_event.wait()
+                last = clock()
+                continue
+            now = clock()
+            delta, last = min(now - last, settings.interval * 2), now
+            point, _, done = motion.advance(delta, settings)
+            sender = self.set_point if done else self.set_route_point
+            sent = await sender(point)
+            if on_point is not None and sent is not False:
+                await on_point(point)
+            if done:
                 return
 
     async def clear(self) -> None:
@@ -191,6 +195,8 @@ class LocationDevice:
         finally:
             self._simulation = None
             resources, self._resources = self._resources, None
-            if resources is not None:
-                await resources.aclose()
-            self._stop_wda()
+            try:
+                if resources is not None:
+                    await resources.aclose()
+            finally:
+                self._stop_wda()
